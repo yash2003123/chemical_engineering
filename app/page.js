@@ -154,10 +154,6 @@ export default function Page() {
     setError("");
     setPhase("connecting");
     try {
-      const s = await fetch("/api/session");
-      const sd = await s.json();
-      if (!s.ok) throw new Error(sd.error || "Session request failed.");
-
       const pc = new RTCPeerConnection();
       pcRef.current = pc;
 
@@ -190,6 +186,17 @@ export default function Page() {
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+
+      /*
+        Mint the ephemeral token as late as possible, right before it is
+        used. It expires in under a minute, and minting it before the mic
+        permission prompt (which can sit open indefinitely) let it go stale
+        before exchangeSdp ever got to it.
+      */
+      const s = await fetch("/api/session");
+      const sd = await s.json();
+      if (!s.ok) throw new Error(sd.error || "Session request failed.");
+
       const answer = await exchangeSdp(offer.sdp, sd.token, sd.model);
       await pc.setRemoteDescription({ type: "answer", sdp: answer });
 
