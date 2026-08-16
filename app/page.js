@@ -187,17 +187,7 @@ export default function Page() {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      /*
-        Mint the ephemeral token as late as possible, right before it is
-        used. It expires in under a minute, and minting it before the mic
-        permission prompt (which can sit open indefinitely) let it go stale
-        before exchangeSdp ever got to it.
-      */
-      const s = await fetch("/api/session");
-      const sd = await s.json();
-      if (!s.ok) throw new Error(sd.error || "Session request failed.");
-
-      const answer = await exchangeSdp(offer.sdp, sd.token, sd.model);
+      const answer = await exchangeSdp(offer.sdp);
       await pc.setRemoteDescription({ type: "answer", sdp: answer });
 
       setPhase("live");
@@ -210,22 +200,36 @@ export default function Page() {
     }
   };
 
-  async function exchangeSdp(sdp, token, model) {
-    const urls = [
-      `https://api.openai.com/v1/realtime/calls?model=${encodeURIComponent(model)}`,
-      `https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`,
-    ];
-    let last = "";
-    for (const url of urls) {
-      const r = await fetch(url, {
+  /*
+    Mint the ephemeral token as late as possible, right before it is used —
+    it expires in under a minute, and minting it before the mic permission
+    prompt (which can sit open indefinitely) let it go stale before it was
+    ever used. Each URL attempt below gets its own freshly minted token
+    rather than reusing one across attempts, since a failed attempt can
+    burn a single-use token and make the next attempt fail for an unrelated
+    reason that also surfaces as "expired".
+  */
+  async function mintToken() {
+    const s = await fetch("/api/session");
+    const sd = await s.json();
+    if (!s.ok) throw new Error(sd.error || "Session request failed.");
+    return sd;
+  }
+
+  async function exchangeSdp(sdp) {
+    const paths = ["/v1/realtime/calls", "/v1/realtime"];
+    const failures = [];
+    for (const path of paths) {
+      const { token, model } = await mintToken();
+      const r = await fetch(`https://api.openai.com${path}?model=${encodeURIComponent(model)}`, {
         method: "POST",
         body: sdp,
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/sdp" },
       });
       if (r.ok) return await r.text();
-      last = `${r.status} ${await r.text()}`;
+      failures.push(`${path} -> ${r.status} ${await r.text()}`);
     }
-    throw new Error(`Could not reach the voice endpoint. ${last}`);
+    throw new Error(`Could not reach the voice endpoint. ${failures.join(" | ")}`);
   }
 
   function teardown() {
