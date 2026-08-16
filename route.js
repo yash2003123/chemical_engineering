@@ -89,5 +89,8 @@ export async function GET() {
   if (!token) {
     return Response.json({ error: "No token came back from OpenAI." }, { status: 502 });
   }
-  return Response.json({ token, model: MODEL });
+   return Response.json(
+    { token, model: MODEL },
+    { headers: { "Cache-Control": "no-store, max-age=0" } }
+  );
 }
