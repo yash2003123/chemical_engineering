@@ -1,0 +1,9 @@
+{
+  "name": "ChemE Tutor",
+  "short_name": "ChemE",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0E1A1E",
+  "theme_color": "#0E1A1E",
+  "icons": []
+}
