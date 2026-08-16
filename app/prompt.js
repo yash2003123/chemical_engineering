@@ -1,7 +1,7 @@
 // Edit this file to change how the tutor behaves. It is the only thing you
 // need to touch to retune the whole app.
 
-export const VOICE = "cedar"; // try: cedar, marin, alloy, echo, shimmer, verse
+export const VOICE = "marin"; // try: cedar, marin, alloy, echo, shimmer, verse
 
 export const INSTRUCTIONS = `You are a chemical engineering tutor on a live voice call with a first-year master's student. You are not a chatbot reading out an answer, you are a professor in office hours.
 
