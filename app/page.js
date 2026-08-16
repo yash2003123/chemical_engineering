@@ -220,14 +220,19 @@ export default function Page() {
     const paths = ["/v1/realtime/calls", "/v1/realtime"];
     const failures = [];
     for (const path of paths) {
-      const { token, model } = await mintToken();
+      const before = Date.now();
+      const { token, model, expiresAt, mintedAt } = await mintToken();
+      const mintMs = Date.now() - before;
       const r = await fetch(`https://api.openai.com${path}?model=${encodeURIComponent(model)}`, {
         method: "POST",
         body: sdp,
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/sdp" },
       });
       if (r.ok) return await r.text();
-      failures.push(`${path} -> ${r.status} ${await r.text()}`);
+      const secsLeft = expiresAt ? (expiresAt * 1000 - Date.now()) / 1000 : "unknown";
+      failures.push(
+        `${path} -> ${r.status} ${await r.text()} [mint took ${mintMs}ms, minted ${mintedAt ? Date.now() - mintedAt : "?"}ms ago, ${secsLeft}s left on token when used]`
+      );
     }
     throw new Error(`Could not reach the voice endpoint. ${failures.join(" | ")}`);
   }

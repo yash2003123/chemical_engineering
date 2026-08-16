@@ -14,14 +14,21 @@ const MODEL = process.env.REALTIME_MODEL || "gpt-realtime";
   and fall back to the older one rather than hard-failing on a 404.
 */
 
+// How long the ephemeral token stays valid. OpenAI's default (when this is
+// omitted) has been too short in practice, so we ask for a generous window
+// explicitly rather than racing the network.
+const EXPIRES_AFTER_SECONDS = 600;
+
 async function mintCurrent(key) {
   const r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
     method: "POST",
+    cache: "no-store",
     headers: {
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
+      expires_after: { anchor: "created_at", seconds: EXPIRES_AFTER_SECONDS },
       session: {
         type: "realtime",
         model: MODEL,
@@ -38,12 +45,13 @@ async function mintCurrent(key) {
   });
   if (!r.ok) throw new Error(`client_secrets ${r.status}: ${await r.text()}`);
   const d = await r.json();
-  return d.value || d.client_secret?.value;
+  return { token: d.value || d.client_secret?.value, expiresAt: d.expires_at ?? d.client_secret?.expires_at };
 }
 
 async function mintLegacy(key) {
   const r = await fetch("https://api.openai.com/v1/realtime/sessions", {
     method: "POST",
+    cache: "no-store",
     headers: {
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
@@ -59,7 +67,7 @@ async function mintLegacy(key) {
   });
   if (!r.ok) throw new Error(`sessions ${r.status}: ${await r.text()}`);
   const d = await r.json();
-  return d.client_secret?.value || d.value;
+  return { token: d.client_secret?.value || d.value, expiresAt: d.client_secret?.expires_at };
 }
 
 export async function GET() {
@@ -71,23 +79,30 @@ export async function GET() {
     );
   }
 
-  let token, firstError;
+  const mintedAt = Date.now();
+  let result, firstError;
   try {
-    token = await mintCurrent(key);
+    result = await mintCurrent(key);
   } catch (e) {
     firstError = e.message;
     try {
-      token = await mintLegacy(key);
+      result = await mintLegacy(key);
     } catch (e2) {
       return Response.json(
         { error: `Could not open a session. ${firstError} | ${e2.message}` },
-        { status: 502 }
+        { status: 502, headers: { "Cache-Control": "no-store, max-age=0" } }
       );
     }
   }
 
-  if (!token) {
-    return Response.json({ error: "No token came back from OpenAI." }, { status: 502 });
+  if (!result?.token) {
+    return Response.json(
+      { error: "No token came back from OpenAI." },
+      { status: 502, headers: { "Cache-Control": "no-store, max-age=0" } }
+    );
   }
-  return Response.json({ token, model: MODEL });
+  return Response.json(
+    { token: result.token, model: MODEL, expiresAt: result.expiresAt ?? null, mintedAt },
+    { headers: { "Cache-Control": "no-store, max-age=0" } }
+  );
 }
