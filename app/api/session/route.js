@@ -35,7 +35,6 @@ async function mintCurrent(key) {
         instructions: INSTRUCTIONS,
         audio: {
           input: {
-            transcription: { model: "whisper-1" },
             turn_detection: { type: "server_vad", silence_duration_ms: 620 },
           },
           output: { voice: VOICE },
@@ -61,7 +60,6 @@ async function mintLegacy(key) {
       model: MODEL,
       voice: VOICE,
       instructions: INSTRUCTIONS,
-      input_audio_transcription: { model: "whisper-1" },
       turn_detection: { type: "server_vad", silence_duration_ms: 620 },
     }),
   });

@@ -28,8 +28,11 @@ Two settings worth knowing about in `app/api/session/route.js`:
 - `silence_duration_ms: 620` is how long you have to pause before it decides you
   are done talking. Raise it to 900 or so if it keeps cutting you off while you
   think. Lower it to 450 if it feels sluggish.
-- `whisper-1` handles the transcript. It is only used for the on-screen text, not
-  for the conversation itself.
+- Input transcription (Whisper) is off. It only ever fed the on-screen "YOU"
+  text, not the conversation itself, and billed separately per minute on top
+  of the realtime audio cost. Add `transcription: { model: "whisper-1" }`
+  back under `session.audio.input` (and `input_audio_transcription` in the
+  legacy fallback) if you want that text back and don't mind the extra cost.
 
 ## Cost
 
