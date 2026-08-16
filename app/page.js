@@ -22,14 +22,27 @@ const TOPICS = [
   "Process control",
 ];
 
+/*
+  How long you can pause mid-sentence before it decides you are finished.
+  Chemical engineering questions involve a lot of thinking out loud, so the
+  default sits deliberately high.
+*/
+const PACES = [
+  { key: "quick", label: "QUICK", ms: 700 },
+  { key: "normal", label: "NORMAL", ms: 1500 },
+  { key: "patient", label: "PATIENT", ms: 2800 },
+];
+
 export default function Page() {
   const [phase, setPhase] = useState("idle"); // idle | connecting | live | ended
   const [error, setError] = useState("");
   const [muted, setMuted] = useState(false);
-  const [speaking, setSpeaking] = useState(false); // tutor is talking
-  const [hearing, setHearing] = useState(false); // student is talking
+  const [held, setHeld] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [hearing, setHearing] = useState(false);
   const [lines, setLines] = useState([]);
   const [secs, setSecs] = useState(0);
+  const [pace, setPace] = useState(PACES[1]);
 
   const pcRef = useRef(null);
   const dcRef = useRef(null);
@@ -37,18 +50,71 @@ export default function Page() {
   const audioRef = useRef(null);
   const logRef = useRef(null);
   const partialRef = useRef("");
+  const paceRef = useRef(PACES[1]);
+  const heldRef = useRef(false);
+  const quietErrorsRef = useRef(0); // suppress schema-shape errors from session.update
+
+  useEffect(() => { paceRef.current = pace; }, [pace]);
+  useEffect(() => { heldRef.current = held; }, [held]);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [lines]);
 
   useEffect(() => {
-    if (phase !== "live") return;
+    if (phase !== "live" || held) return;
     const t = setInterval(() => setSecs((s) => s + 1), 1000);
     return () => clearInterval(t);
-  }, [phase]);
+  }, [phase, held]);
 
-  /* ---------------- transcript plumbing ---------------- */
+  /* ---------------- session control ---------------- */
+
+  const send = (obj) => {
+    const dc = dcRef.current;
+    if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj));
+  };
+
+  /*
+    Turn detection lives at a different path depending on which revision of the
+    realtime API your account is on. Rather than guessing, push both shapes and
+    let the wrong one bounce. We swallow the resulting complaint so it does not
+    show up as a scary red box.
+  */
+  const applyTurnDetection = (enabled) => {
+    const td = enabled
+      ? { type: "server_vad", silence_duration_ms: paceRef.current.ms, threshold: 0.5 }
+      : null;
+
+    quietErrorsRef.current = 2;
+    send({ type: "session.update", session: { audio: { input: { turn_detection: td } } } });
+    send({ type: "session.update", session: { turn_detection: td } });
+  };
+
+  const hold = () => {
+    setHeld(true);
+    send({ type: "response.cancel" });        // stop it composing
+    send({ type: "output_audio_buffer.clear" }); // stop audio already queued
+    applyTurnDetection(false);                // and stop it listening for a cue
+    const tr = micRef.current?.getAudioTracks?.()[0];
+    if (tr) tr.enabled = false;
+    setSpeaking(false);
+    setHearing(false);
+  };
+
+  const resume = () => {
+    setHeld(false);
+    applyTurnDetection(true);
+    const tr = micRef.current?.getAudioTracks?.()[0];
+    if (tr) tr.enabled = !muted;
+  };
+
+  const changePace = (p) => {
+    setPace(p);
+    paceRef.current = p;
+    if (phase === "live" && !heldRef.current) applyTurnDetection(true);
+  };
+
+  /* ---------------- transcript ---------------- */
 
   const pushLine = (role, text) => {
     const clean = (text || "").trim();
@@ -59,10 +125,9 @@ export default function Page() {
   const handleEvent = (ev) => {
     const t = ev.type || "";
 
-    // The tutor's speech, streamed as text alongside the audio.
     if (t.endsWith("audio_transcript.delta")) {
       partialRef.current += ev.delta || "";
-      setSpeaking(true);
+      if (!heldRef.current) setSpeaking(true);
       return;
     }
     if (t.endsWith("audio_transcript.done")) {
@@ -70,17 +135,17 @@ export default function Page() {
       partialRef.current = "";
       return;
     }
-
-    // What you said, transcribed after the fact.
     if (t === "conversation.item.input_audio_transcription.completed") {
       pushLine("you", ev.transcript);
       return;
     }
-
     if (t === "input_audio_buffer.speech_started") { setHearing(true); setSpeaking(false); return; }
     if (t === "input_audio_buffer.speech_stopped") { setHearing(false); return; }
     if (t === "response.done" || t === "output_audio_buffer.stopped") { setSpeaking(false); return; }
-    if (t === "error") { setError(ev.error?.message || "The session hit an error."); }
+    if (t === "error") {
+      if (quietErrorsRef.current > 0) { quietErrorsRef.current -= 1; return; }
+      setError(ev.error?.message || "The session hit an error.");
+    }
   };
 
   /* ---------------- connect ---------------- */
@@ -96,7 +161,6 @@ export default function Page() {
       const pc = new RTCPeerConnection();
       pcRef.current = pc;
 
-      // Tutor's voice arrives on this track.
       pc.ontrack = (e) => {
         if (audioRef.current) {
           audioRef.current.srcObject = e.streams[0];
@@ -104,7 +168,6 @@ export default function Page() {
         }
       };
 
-      // Your microphone goes the other way.
       const mic = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true },
       });
@@ -113,30 +176,25 @@ export default function Page() {
 
       const dc = pc.createDataChannel("oai-events");
       dcRef.current = dc;
-      dc.onmessage = (e) => {
-        try { handleEvent(JSON.parse(e.data)); } catch (_) {}
-      };
+      dc.onmessage = (e) => { try { handleEvent(JSON.parse(e.data)); } catch (_) {} };
       dc.onopen = () => {
+        applyTurnDetection(true); // push the chosen pace as soon as we can
         if (opener) {
-          dc.send(JSON.stringify({
+          send({
             type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: opener }],
-            },
-          }));
-          dc.send(JSON.stringify({ type: "response.create" }));
+            item: { type: "message", role: "user", content: [{ type: "input_text", text: opener }] },
+          });
+          send({ type: "response.create" });
         }
       };
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-
       const answer = await exchangeSdp(offer.sdp, sd.token, sd.model);
       await pc.setRemoteDescription({ type: "answer", sdp: answer });
 
       setPhase("live");
+      setHeld(false);
       setSecs(0);
     } catch (e) {
       setError(e.message || String(e));
@@ -145,7 +203,6 @@ export default function Page() {
     }
   };
 
-  // OpenAI renamed this path once, so try the current one then the old one.
   async function exchangeSdp(sdp, token, model) {
     const urls = [
       `https://api.openai.com/v1/realtime/calls?model=${encodeURIComponent(model)}`,
@@ -156,10 +213,7 @@ export default function Page() {
       const r = await fetch(url, {
         method: "POST",
         body: sdp,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/sdp",
-        },
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/sdp" },
       });
       if (r.ok) return await r.text();
       last = `${r.status} ${await r.text()}`;
@@ -174,13 +228,13 @@ export default function Page() {
     dcRef.current = null; pcRef.current = null; micRef.current = null;
   }
 
-  const hangUp = () => { teardown(); setPhase("ended"); setSpeaking(false); setHearing(false); };
+  const hangUp = () => { teardown(); setPhase("ended"); setSpeaking(false); setHearing(false); setHeld(false); };
 
   const toggleMute = () => {
+    const next = !muted;
+    setMuted(next);
     const tr = micRef.current?.getAudioTracks?.()[0];
-    if (!tr) return;
-    tr.enabled = !tr.enabled;
-    setMuted(!tr.enabled);
+    if (tr && !heldRef.current) tr.enabled = !next;
   };
 
   useEffect(() => () => teardown(), []);
@@ -190,6 +244,7 @@ export default function Page() {
   const lamp =
     phase === "connecting" ? { c: C.amber, t: "CONNECTING" } :
     phase !== "live" ? { c: C.rule, t: "STANDBY" } :
+    held ? { c: C.amber, t: "HELD" } :
     speaking ? { c: C.green, t: "TUTOR SPEAKING" } :
     hearing ? { c: C.cyan, t: "LISTENING" } :
     { c: C.cyan, t: "ON CALL" };
@@ -206,7 +261,7 @@ export default function Page() {
           <div style={{ color: C.paper, fontSize: 17, fontWeight: 600 }}>Chemical Engineering Tutor</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ width: 9, height: 9, borderRadius: 99, background: lamp.c, boxShadow: phase === "live" ? `0 0 10px ${lamp.c}` : "none" }} />
+          <span style={{ width: 9, height: 9, borderRadius: 99, background: lamp.c, boxShadow: phase === "live" && !held ? `0 0 10px ${lamp.c}` : "none" }} />
           <span style={{ fontFamily: MONO, fontSize: 10, letterSpacing: "0.16em", color: C.dim }}>{lamp.t}</span>
         </div>
       </header>
@@ -215,8 +270,8 @@ export default function Page() {
         {phase === "idle" && lines.length === 0 && (
           <div style={{ maxWidth: 520 }}>
             <p style={{ color: C.paper, fontSize: 16, lineHeight: 1.6, margin: 0 }}>
-              Tap the call button and say what is confusing you. It interrupts and gets interrupted,
-              so talk over it whenever you want.
+              Tap the call button and say what is confusing you. Hold the line whenever you need
+              time to read or think, it will wait.
             </p>
             <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: "0.18em", color: C.dim, marginTop: 26 }}>
               OR OPEN ON A TOPIC
@@ -253,13 +308,33 @@ export default function Page() {
         </div>
       </div>
 
-      <footer style={{ borderTop: `1px solid ${C.rule}`, background: C.panel, padding: "16px 18px calc(16px + env(safe-area-inset-bottom))" }}>
-        {phase === "live" && (
-          <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: "0.16em", color: C.dim, marginBottom: 12 }}>
-            {mmss} ELAPSED
-          </div>
-        )}
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <footer style={{ borderTop: `1px solid ${C.rule}`, background: C.panel, padding: "14px 18px calc(14px + env(safe-area-inset-bottom))" }}>
+        {/* Pace selector: how long it waits before assuming you are done */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+          <span style={{ fontFamily: MONO, fontSize: 10, letterSpacing: "0.16em", color: C.dim }}>WAIT</span>
+          {PACES.map((p) => (
+            <button
+              key={p.key}
+              onClick={() => changePace(p)}
+              style={{
+                fontFamily: MONO, fontSize: 10, letterSpacing: "0.12em", cursor: "pointer",
+                padding: "6px 10px",
+                color: pace.key === p.key ? C.chassis : C.dim,
+                background: pace.key === p.key ? C.cyan : "transparent",
+                border: `1px solid ${pace.key === p.key ? C.cyan : C.rule}`,
+              }}
+            >
+              {p.label}
+            </button>
+          ))}
+          {phase === "live" && (
+            <span style={{ fontFamily: MONO, fontSize: 10, letterSpacing: "0.16em", color: C.dim, marginLeft: "auto" }}>
+              {mmss}
+            </span>
+          )}
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {phase !== "live" ? (
             <button
               onClick={() => connect(null)}
@@ -271,16 +346,33 @@ export default function Page() {
           ) : (
             <>
               <button
+                onClick={held ? resume : hold}
+                style={{
+                  flex: 1.4, padding: "16px", fontFamily: MONO, fontSize: 12, letterSpacing: "0.14em", cursor: "pointer",
+                  color: held ? C.chassis : C.amber,
+                  background: held ? C.amber : "transparent",
+                  border: `1px solid ${C.amber}`,
+                }}
+              >
+                {held ? "RESUME" : "HOLD"}
+              </button>
+              <button
                 onClick={toggleMute}
-                style={{ flex: 1, background: "transparent", color: muted ? C.amber : C.paper, border: `1px solid ${muted ? C.amber : C.rule}`, padding: "16px", fontFamily: MONO, fontSize: 12, letterSpacing: "0.16em", cursor: "pointer" }}
+                disabled={held}
+                style={{
+                  flex: 1, padding: "16px", fontFamily: MONO, fontSize: 12, letterSpacing: "0.14em",
+                  cursor: held ? "default" : "pointer", opacity: held ? 0.35 : 1,
+                  color: muted ? C.amber : C.paper, background: "transparent",
+                  border: `1px solid ${muted ? C.amber : C.rule}`,
+                }}
               >
                 {muted ? "UNMUTE" : "MUTE"}
               </button>
               <button
                 onClick={hangUp}
-                style={{ flex: 1, background: "#B4553F", color: C.paper, border: "none", padding: "16px", fontFamily: MONO, fontSize: 12, letterSpacing: "0.16em", cursor: "pointer" }}
+                style={{ flex: 1, background: "#B4553F", color: C.paper, border: "none", padding: "16px", fontFamily: MONO, fontSize: 12, letterSpacing: "0.14em", cursor: "pointer" }}
               >
-                HANG UP
+                END
               </button>
             </>
           )}
