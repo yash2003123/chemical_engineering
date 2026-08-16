@@ -40,8 +40,16 @@ Realtime audio is billed per minute of audio in and out, and it is meaningfully
 more expensive than text. Budget on the order of a few tens of cents per ten
 minute session, but check OpenAI's current pricing page rather than trusting that
 number, since it has moved several times. Set a hard spend limit in your OpenAI
-account before you put this on your phone. It is very easy to leave a call open
-in a background tab.
+account before you put this on your phone.
+
+The call also hangs up on its own after two minutes of silence (`IDLE_HANGUP_MS`
+in `app/page.js`), so a call left open in a background tab won't keep billing
+indefinitely. Holding the line still counts toward that two minutes — RESUME
+before it runs out, or raise `IDLE_HANGUP_MS` if you regularly need longer.
+
+While she's talking, your mic mutes itself so background noise can't interrupt
+her — the MUTE/UNMUTE button flips to UNMUTE during her turn, and tapping it is
+how you deliberately cut her off.
 
 ## If something breaks
 

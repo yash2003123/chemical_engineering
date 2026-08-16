@@ -33,6 +33,13 @@ const PACES = [
   { key: "patient", label: "PATIENT", ms: 2800 },
 ];
 
+/*
+  Realtime audio bills for however long the mic stays connected, silence
+  included, so a call left open unattended quietly racks up cost. Hang up
+  automatically once nobody has said anything for this long.
+*/
+const IDLE_HANGUP_MS = 120_000;
+
 export default function Page() {
   const [phase, setPhase] = useState("idle"); // idle | connecting | live | ended
   const [error, setError] = useState("");
@@ -53,6 +60,8 @@ export default function Page() {
   const paceRef = useRef(PACES[1]);
   const heldRef = useRef(false);
   const quietErrorsRef = useRef(0); // suppress schema-shape errors from session.update
+  const autoMutedRef = useRef(false); // true when muted() was us ducking her voice, not the user
+  const lastActivityRef = useRef(Date.now());
 
   useEffect(() => { paceRef.current = pace; }, [pace]);
   useEffect(() => { heldRef.current = held; }, [held]);
@@ -67,7 +76,40 @@ export default function Page() {
     return () => clearInterval(t);
   }, [phase, held]);
 
+  // Auto hang-up on silence, independent of the display timer above so it
+  // still counts down while held.
+  useEffect(() => {
+    if (phase !== "live") return;
+    const t = setInterval(() => {
+      if (Date.now() - lastActivityRef.current > IDLE_HANGUP_MS) {
+        setError(`Call ended after ${Math.round(IDLE_HANGUP_MS / 60000)} minutes of silence to avoid running up cost.`);
+        hangUp();
+      }
+    }, 5000);
+    return () => clearInterval(t);
+  }, [phase]);
+
+  // Duck the mic while she's talking so background noise can't barge in;
+  // interrupting takes a deliberate tap on UNMUTE.
+  useEffect(() => {
+    if (phase !== "live" || heldRef.current) return;
+    const tr = micRef.current?.getAudioTracks?.()[0];
+    if (speaking) {
+      if (!muted) {
+        setMuted(true);
+        if (tr) tr.enabled = false;
+        autoMutedRef.current = true;
+      }
+    } else if (autoMutedRef.current) {
+      setMuted(false);
+      if (tr) tr.enabled = true;
+      autoMutedRef.current = false;
+    }
+  }, [speaking, phase]);
+
   /* ---------------- session control ---------------- */
+
+  const bumpActivity = () => { lastActivityRef.current = Date.now(); };
 
   const send = (obj) => {
     const dc = dcRef.current;
@@ -91,6 +133,7 @@ export default function Page() {
   };
 
   const hold = () => {
+    bumpActivity();
     setHeld(true);
     send({ type: "response.cancel" });        // stop it composing
     send({ type: "output_audio_buffer.clear" }); // stop audio already queued
@@ -102,6 +145,7 @@ export default function Page() {
   };
 
   const resume = () => {
+    bumpActivity();
     setHeld(false);
     applyTurnDetection(true);
     const tr = micRef.current?.getAudioTracks?.()[0];
@@ -109,6 +153,7 @@ export default function Page() {
   };
 
   const changePace = (p) => {
+    bumpActivity();
     setPace(p);
     paceRef.current = p;
     if (phase === "live" && !heldRef.current) applyTurnDetection(true);
@@ -124,6 +169,7 @@ export default function Page() {
 
   const handleEvent = (ev) => {
     const t = ev.type || "";
+    bumpActivity();
 
     if (t.endsWith("audio_transcript.delta")) {
       partialRef.current += ev.delta || "";
@@ -193,6 +239,7 @@ export default function Page() {
       setPhase("live");
       setHeld(false);
       setSecs(0);
+      bumpActivity();
     } catch (e) {
       setError(e.message || String(e));
       setPhase("idle");
@@ -244,9 +291,15 @@ export default function Page() {
     dcRef.current = null; pcRef.current = null; micRef.current = null;
   }
 
-  const hangUp = () => { teardown(); setPhase("ended"); setSpeaking(false); setHearing(false); setHeld(false); };
+  const hangUp = () => {
+    teardown();
+    setPhase("ended"); setSpeaking(false); setHearing(false); setHeld(false);
+    autoMutedRef.current = false;
+  };
 
   const toggleMute = () => {
+    bumpActivity();
+    autoMutedRef.current = false; // manual tap always overrides the auto-duck
     const next = !muted;
     setMuted(next);
     const tr = micRef.current?.getAudioTracks?.()[0];
